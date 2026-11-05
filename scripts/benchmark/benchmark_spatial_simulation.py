@@ -195,7 +195,7 @@ def bench_audiblelight_pipeline(backend, n_static, n_moving, duration=30):
     for dev in DEVICES:
         for dn in ("float64", "float32"):
             t = timeit(lambda: render(dev, dn), dev, repeats=1)
-            row["torch"][f"{dev}-{dn[-2:]}"] = dict(
+            row["torch"][f"{dev}-f{dn[-2:]}"] = dict(
                 render_s=t, render_speedup=t_np / t,
                 total_speedup=(t_sim + t_np) / (t_sim + t),
                 rel_err=rel_err(ref, sc.audio["mic000"]))
@@ -236,7 +236,7 @@ def bench_spatialscaper_pipeline(ss_repo, n_events=6, duration=30):
     for dev in DEVICES:
         for dn in ("float64", "float32"):
             t = timeit(lambda: gen(dev, dn), dev, repeats=1)
-            row["torch"][f"{dev}-{dn[-2:]}"] = dict(generate_s=t, speedup=t_np / t,
+            row["torch"][f"{dev}-f{dn[-2:]}"] = dict(generate_s=t, speedup=t_np / t,
                                                      rel_err=rel_err(ref, gen(dev, dn)))
     # dataloader: plan on CPU, synthesize a batch of 8 scenes in one go
     ds = SpatialScaperDataset(fg, rir, duration=duration, n_events=n_events, split=None,
