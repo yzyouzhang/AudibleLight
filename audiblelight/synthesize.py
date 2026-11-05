@@ -504,6 +504,87 @@ def compute_dry_audio(
         return
 
 
+def _torch_dtype(dtype):
+    import torch
+
+    return getattr(torch, dtype) if isinstance(dtype, str) else dtype
+
+
+def _convolve_static(audio, ir, device=None, dtype="float32") -> np.ndarray:
+    """`time_invariant_convolution`, on the requested backend."""
+    if device is None:
+        return time_invariant_convolution(audio, ir)
+    from audiblelight.synthesize_torch import time_invariant_convolution_torch
+
+    out = time_invariant_convolution_torch(audio, ir, device, _torch_dtype(dtype))
+    return out.cpu().numpy()
+
+
+def _convolve_moving(
+    irs, event, fft_size, win_size, hop_size, device=None, dtype="float32"
+) -> np.ndarray:
+    """`time_variant_convolution`, on the requested backend."""
+    if device is None:
+        return time_variant_convolution(irs, event, fft_size, win_size, hop_size)
+    from audiblelight.synthesize_torch import time_variant_convolution_torch
+
+    out = time_variant_convolution_torch(
+        irs,
+        event.load_audio(),
+        np.linspace(0, event.duration, len(event)),
+        event.sample_rate,
+        utils.sanitise_positive_number(fft_size, cast_to=int),
+        utils.sanitise_positive_number(win_size, cast_to=int),
+        utils.sanitise_positive_number(hop_size, cast_to=int),
+        device=device,
+        dtype=_torch_dtype(dtype),
+    )
+    return out.cpu().numpy()
+
+
+def _batch_moving_events(
+    events_irs: list, device, dtype, fft_size, win_size, hop_size, ignore_cache=False
+) -> dict:
+    """Spatialize all moving events of a scene in one batched GPU call.
+
+    Arguments:
+        events_irs: list of (event, irs) with irs of shape (n_ch, n_emitters, n_samples), un-normalized
+
+    Returns:
+        dict of {event alias: spatial audio (n_ch, n_samples)}
+    """
+    from audiblelight.synthesize_torch import time_variant_convolution_batch
+
+    items, aliases = [], []
+    for event, irs in events_irs:
+        if len(event) < 2 or not event.is_moving:
+            continue
+        audio = event.load_audio(ignore_cache=ignore_cache, normalize=True)
+        irs_n = normalize_irs(irs.copy().transpose(1, 0, 2)).transpose(1, 0, 2)
+        items.append(
+            dict(
+                audio=audio,
+                irs=irs_n,
+                ir_times=np.linspace(0, event.duration, len(event)),
+            )
+        )
+        aliases.append(event.alias)
+    if not items:
+        return {}
+    sample_rates = {ev.sample_rate for ev, _ in events_irs}
+    assert len(sample_rates) == 1, "all events must share a sample rate"
+    outs = time_variant_convolution_batch(
+        items,
+        sample_rates.pop(),
+        int(fft_size),
+        int(win_size),
+        int(hop_size),
+        device=device,
+        dtype=_torch_dtype(dtype),
+    )
+    return {a: o.cpu().numpy() for a, o in zip(aliases, outs)}
+
+
 def render_event_audio(
     event: Event,
     irs: np.ndarray,
@@ -513,6 +594,9 @@ def render_event_audio(
     fft_size: Optional[custom_types.Numeric] = config.FFT_SIZE,
     win_size: Optional[custom_types.Numeric] = config.WIN_SIZE,
     hop_size: Optional[custom_types.Numeric] = config.HOP_SIZE,
+    device: Optional[str] = None,
+    dtype: Optional[str] = "float32",
+    precomputed_spatial: Optional[np.ndarray] = None,
 ) -> None:
     """
     Renders audio for a given `Event` object.
@@ -533,6 +617,11 @@ def render_event_audio(
         fft_size (custom_types.Numeric): size of the FFT, defaults to 512 samples
         win_size (int): the window size of the FFT, defaults to 256 samples
         hop_size (custom_types.Numeric): the size of the hop between FFTs, defaults to 128 samples
+        device (str): if None (default), convolutions use the reference NumPy/SciPy code. Otherwise the PyTorch
+            kernels in `audiblelight.synthesize_torch` are used on this device ("cuda", "cpu", "auto", ...).
+        dtype (str): precision for the PyTorch kernels, "float32" (default) or "float64".
+        precomputed_spatial (np.ndarray): spatialized audio for this event computed elsewhere (e.g. batched over
+            all events of a Scene by `render_audio_for_all_scene_events`), with shape (n_channels, n_samples).
 
     Returns:
         None
@@ -560,13 +649,16 @@ def render_event_audio(
     irs_copy = normalize_irs(irs_copy.transpose(1, 0, 2)).transpose(1, 0, 2)
 
     # THIS IS NOW EQUIVALENT TO spatialscaper.spatialize FUNC
+    if precomputed_spatial is not None:
+        spatial = precomputed_spatial
+
     # Only a single emitter (IR): we can convolve easily with scipy
-    if n_emitters == 1:
+    elif n_emitters == 1:
         if event.is_moving:
             raise ValueError(
                 "Moving Event has only one emitter!"
             )  # something has gone very wrong to hit this
-        spatial = time_invariant_convolution(audio, irs_copy[:, 0].T)
+        spatial = _convolve_static(audio, irs_copy[:, 0].T, device, dtype)
 
     # No emitters: means that audio is not spatialized
     elif n_emitters == 0:
@@ -582,8 +674,8 @@ def render_event_audio(
             raise ValueError(
                 "Expected a moving event!"
             )  # something has gone very wrong to hit this
-        spatial = time_variant_convolution(
-            irs_copy, event, fft_size, win_size, hop_size
+        spatial = _convolve_moving(
+            irs_copy, event, fft_size, win_size, hop_size, device, dtype
         )
 
     # Pad or truncate the audio to match the desired number of samples
@@ -611,7 +703,10 @@ def render_event_audio(
 
 
 def render_audio_for_all_scene_events(
-    scene: Scene, ignore_cache: Optional[bool] = False
+    scene: Scene,
+    ignore_cache: Optional[bool] = False,
+    device: Optional[str] = None,
+    dtype: Optional[str] = "float32",
 ) -> None:
     """
     Renders audio for all `Events` associated with a given `Scene` object.
@@ -627,6 +722,10 @@ def render_audio_for_all_scene_events(
     Arguments:
         scene: Scene object with associated `WorldState`, `Emitter`, `MicArray`, `Event` objects added.
         ignore_cache (optional): If True, cached Event audio will be ignored
+        device (optional): If None (default), convolutions run with the reference NumPy/SciPy code. Otherwise,
+            PyTorch kernels are used on this device (e.g. "cuda") and all moving events for a microphone are
+            spatialized together in one batched call.
+        dtype (optional): precision for the PyTorch kernels, "float32" (default) or "float64".
 
     Returns:
         None
@@ -651,28 +750,47 @@ def render_audio_for_all_scene_events(
     # Iterate over all microphones
     start = time()
     for mic_alias, mic_ir in irs.items():
-        # We need a separate counter for each microphone
+        # Grab the IRs for each event's emitters
+        #  This gets us (N_capsules, N_emitters, N_samples) per event
         emitter_counter = 0
+        events_irs = []
+        for event in scene.events.values():
+            events_irs.append(
+                (event, mic_ir[:, emitter_counter : len(event) + emitter_counter, :])
+            )
+            emitter_counter += len(event)
 
-        # Iterate over all events
-        for event_alias, event in scene.events.items():
+        # On the GPU path, spatialize all (uncached) moving events together
+        precomputed = {}
+        if device is not None:
+            todo = [
+                (ev, ir)
+                for ev, ir in events_irs
+                if ignore_cache or mic_alias not in ev.spatial_audio
+            ]
+            precomputed = _batch_moving_events(
+                todo,
+                device,
+                dtype,
+                config.FFT_SIZE,
+                config.WIN_SIZE,
+                config.HOP_SIZE,
+                ignore_cache=ignore_cache,
+            )
 
-            # Grab the IRs for the current event's emitters
-            #  This gets us (N_capsules, N_emitters, N_samples)
-            event_irs = mic_ir[:, emitter_counter : len(event) + emitter_counter, :]
-
-            # Render the audio for the event at this microphone
-            #  This function has no return, instead it just sets the `spatial_audio` attribute for the Event
+        # Render the audio for each event at this microphone
+        #  This function has no return, instead it just sets the `spatial_audio` attribute for the Event
+        for event, event_irs in events_irs:
             render_event_audio(
                 event,
                 event_irs,
                 mic_alias=mic_alias,
                 ref_db=scene.ref_db,
                 ignore_cache=ignore_cache,
+                device=device,
+                dtype=dtype,
+                precomputed_spatial=precomputed.get(event.alias),
             )
-
-            # Update the counter
-            emitter_counter += len(event)
 
     logger.info(f"Rendered scene audio in {(time() - start):.2f} seconds!")
 

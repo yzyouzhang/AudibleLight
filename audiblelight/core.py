@@ -1796,6 +1796,8 @@ class Scene:
         metadata_fname: Optional[Union[str, Path]] = "metadata_out",
         video: bool = False,
         video_fname: Optional[Union[str, Path]] = "video_out",
+        device: Optional[str] = None,
+        dtype: Optional[str] = "float32",
     ) -> None:
         """
         Render scene to disk.
@@ -1810,6 +1812,9 @@ class Scene:
             metadata_fname: name to use for the output metadata, default to "metadata_out"
             video: whether to save video as an output, default to `False`
             video_fname: name to use for the output video, default to "video_out"
+            device: if None (default), audio is convolved with the reference NumPy/SciPy code. Otherwise, PyTorch
+                kernels are used on this device ("cuda", "cpu", "auto", ...); see `audiblelight.synthesize_torch`.
+            dtype: precision for the PyTorch kernels, "float32" (default) or "float64".
 
         Returns:
             None
@@ -1834,7 +1839,7 @@ class Scene:
             #  This renders the IRs inside the worldstate
             #  It then populates the `.spatial_audio` attribute inside each Event
             #  And populates the `audio` attribute inside this instance
-            render_audio_for_all_scene_events(self)
+            render_audio_for_all_scene_events(self, device=device, dtype=dtype)
             generate_scene_audio_from_events(self)
 
             for mic_alias, mic_audio in self.audio.items():

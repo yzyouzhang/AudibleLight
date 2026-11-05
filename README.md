@@ -102,6 +102,19 @@ To see the available arguments that this script takes, add the `--help` argument
 
 If you want to generate custom datasets (or want to implement `AudibleLight` in a larger pipeline), please see the [quickstart](https://audiblelight.github.io/AudibleLight/_examples/quickstart.html), [tutorials](https://audiblelight.github.io/AudibleLight/_examples/1.0.0_make_scene.html), and [API documentation](https://audiblelight.github.io/AudibleLight/core.html).
 
+### GPU-accelerated convolution
+
+Convolving event audio with the IRs (especially the time-variant convolution used for moving events) can run on a GPU with PyTorch:
+
+```python
+scene.generate(output_dir="out", device="cuda")                    # float32 (default)
+scene.generate(output_dir="out", device="cuda", dtype="float64")   # matches the NumPy path to ~1e-15
+```
+
+The default `device=None` keeps the original NumPy/SciPy code. With a device set, all moving events for a microphone are convolved together in one batched call (`audiblelight.synthesize_torch`). The kernels match the NumPy implementation to round-off (`tests/test_synthesize_torch.py`).
+
+IR generation is not affected: the `rlr` ray tracer runs on the CPU. To time IR generation and convolution separately on your hardware, run `python scripts/benchmark/benchmark_spatial_simulation.py`.
+
 ## Contributions
 
 ... are welcome! Please [make a PR](https://github.com/AudibleLight/AudibleLight/pulls) or take a look [at the open issues](https://github.com/AudibleLight/AudibleLight/issues).
