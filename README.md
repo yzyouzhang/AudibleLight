@@ -113,7 +113,7 @@ scene.generate(output_dir="out", device="cuda", dtype="float64")   # matches the
 
 The default `device=None` keeps the original NumPy/SciPy code. With a device set, all moving events for a microphone are convolved together in one batched call (`audiblelight.synthesize_torch`). The kernels match the NumPy implementation to round-off (`tests/test_synthesize_torch.py`).
 
-IR generation is not affected: the `rlr` ray tracer runs on the CPU. To time IR generation and convolution separately on your hardware, run `python scripts/benchmark/benchmark_spatial_simulation.py`.
+IR generation is not affected: the `rlr` ray tracer runs on the CPU. To time IR generation and convolution separately on your hardware, run `python scripts/benchmark/benchmark_spatial_simulation.py`. See [GPU_ACCELERATION.md](GPU_ACCELERATION.md) for details, benchmark results and next steps on a GPU machine.
 
 ## Contributions
 
